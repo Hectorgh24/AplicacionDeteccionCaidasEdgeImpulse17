@@ -1,20 +1,22 @@
 package com.empresa.aplicacionedgeimpulse17
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
-import android.net.Uri
 import android.os.Bundle
-import android.os.CountDownTimer
 import android.util.Log
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import kotlin.math.roundToInt
 
 class MainActivity : AppCompatActivity(), SensorEventListener {
@@ -33,10 +35,8 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private val featuresBuffer = FloatArray(bufferSize)
     private var bufferIndex = 0
 
-    // Temporizador de 5 segundos
-    private var fallTimer: CountDownTimer? = null
-    private var isTimerRunning = false
     private val FALL_THRESHOLD = 0.85f // Umbral de confianza
+    private var isAlertActive = false
     
     // Clases que representan caídas
     private val FALL_CLASSES = listOf(
@@ -68,6 +68,8 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
     companion object {
         private const val TAG = "EdgeImpulseAppLogs"
+        private const val PERMISSION_REQUEST_CODE = 101
+        private const val REQUEST_CODE_ALERT = 102
 
         init {
             System.loadLibrary("aplicacionedgeimpulse17")
@@ -88,10 +90,12 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
+        checkPermissions()
+
         btnToggleMonitor.setOnClickListener {
             val phone = etPhone.text.toString()
-            if (phone.isEmpty()) {
-                Toast.makeText(this, "Ingresa un número válido para WhatsApp", Toast.LENGTH_SHORT).show()
+            if (phone.length != 10) {
+                Toast.makeText(this, "Ingresa un número válido de 10 dígitos", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
 
@@ -103,10 +107,24 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         }
     }
 
+    private fun checkPermissions() {
+        val permissions = arrayOf(
+            Manifest.permission.SEND_SMS,
+            Manifest.permission.CALL_PHONE
+        )
+        val missingPermissions = permissions.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missingPermissions.isNotEmpty()) {
+            ActivityCompat.requestPermissions(this, missingPermissions.toTypedArray(), PERMISSION_REQUEST_CODE)
+        }
+    }
+
     private fun startMonitoring() {
         accelerometer?.let {
             sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
             isMonitoring = true
+            isAlertActive = false
             btnToggleMonitor.text = "Detener Monitoreo"
             tvStatus.text = "Monitoreando..."
             bufferIndex = 0
@@ -119,12 +137,11 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         isMonitoring = false
         btnToggleMonitor.text = "Iniciar Monitoreo"
         tvStatus.text = "Detenido"
-        cancelFallTimer()
         logInfo("Monitoreo detenido.")
     }
 
     override fun onSensorChanged(event: SensorEvent?) {
-        if (event == null || !isMonitoring) return
+        if (event == null || !isMonitoring || isAlertActive) return
 
         if (event.sensor.type == Sensor.TYPE_ACCELEROMETER) {
             featuresBuffer[bufferIndex++] = event.values[0]
@@ -162,57 +179,31 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             logInfo("Inferencia completada: $label ($percentage%)")
 
             if (FALL_CLASSES.contains(label) && confidence >= FALL_THRESHOLD) {
-                if (!isTimerRunning) {
-                    logInfo("Posible caída detectada ($label). Iniciando temporizador.")
-                    startFallTimer(translatedLabel)
-                }
+                logInfo("Posible caída detectada ($label). Lanzando AlertActivity.")
+                startFallAlert(translatedLabel)
             }
         }
     }
 
-    private fun startFallTimer(fallType: String) {
-        isTimerRunning = true
-        runOnUiThread { tvStatus.text = "¡Alerta! $fallType en 5s..." }
-
-        fallTimer = object : CountDownTimer(5000, 1000) {
-            override fun onTick(millisUntilFinished: Long) {
-                val sec = millisUntilFinished / 1000
-                logInfo("Temporizador de caída: ${sec}s restantes.")
-                runOnUiThread { tvStatus.text = "¡Alerta en ${sec}s!" }
-            }
-
-            override fun onFinish() {
-                isTimerRunning = false
-                logInfo("Temporizador finalizado. Ejecutando protocolo de emergencia.")
-                runOnUiThread { tvStatus.text = "Abriendo WhatsApp..." }
-                executeEmergencyProtocol(fallType)
-            }
-        }.start()
-    }
-
-    private fun cancelFallTimer() {
-        fallTimer?.cancel()
-        isTimerRunning = false
-        runOnUiThread { if (isMonitoring) tvStatus.text = "Monitoreando..." }
-        logInfo("Temporizador de caída cancelado.")
-    }
-
-    private fun executeEmergencyProtocol(fallType: String) {
-        val phone = etPhone.text.toString().replace("+", "").replace(" ", "")
-        val message = "🚨 *SOS: ALERTA DE EMERGENCIA* 🚨\nSufrí una posible caída o accidente ($fallType). Por favor, comunícate conmigo de inmediato o envía ayuda."
-        try {
-            val intent = Intent(Intent.ACTION_VIEW)
-            intent.data = Uri.parse("https://api.whatsapp.com/send?phone=$phone&text=${Uri.encode(message)}")
-            startActivity(intent)
-            logInfo("Abriendo WhatsApp con mensaje de emergencia hacia $phone.")
-        } catch (e: Exception) {
-            logError("Error al abrir WhatsApp: ${e.message}")
-            Toast.makeText(this, "Error al abrir WhatsApp. ¿Está instalado?", Toast.LENGTH_LONG).show()
-        }
+    private fun startFallAlert(fallType: String) {
+        isAlertActive = true
+        val phone = etPhone.text.toString().trim()
         
-        // Reiniciar estado
-        if(isMonitoring) {
-            runOnUiThread { tvStatus.text = "Monitoreando..." }
+        val intent = Intent(this, AlertActivity::class.java).apply {
+            putExtra(AlertActivity.EXTRA_PHONE, phone)
+            putExtra(AlertActivity.EXTRA_FALL_TYPE, fallType)
+        }
+        startActivityForResult(intent, REQUEST_CODE_ALERT)
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_CODE_ALERT) {
+            isAlertActive = false
+            bufferIndex = 0
+            if (isMonitoring) {
+                tvStatus.text = "Monitoreando..."
+            }
         }
     }
 
