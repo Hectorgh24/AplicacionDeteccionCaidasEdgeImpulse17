@@ -10,6 +10,8 @@ import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.Bundle
 import android.util.Log
+import android.view.Menu
+import android.view.MenuItem
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
@@ -58,11 +60,11 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         "going_down_stairs" to "Bajando escaleras",
         "going_up_stairs" to "Subiendo escaleras",
         "jump" to "Saltando",
-        "lying_down_fs" to "Acostándose (FS)",
+        "lying_down_fs" to "Acostándose (Desde Silla)",
         "run" to "Corriendo",
         "sitting_down" to "Sentándose",
-        "standing_up_fl" to "Levantándose (FL)",
-        "standing_up_fs" to "Levantándose (FS)",
+        "standing_up_fl" to "Levantándose (Desde Suelo)",
+        "standing_up_fs" to "Levantándose (Desde Silla)",
         "walk" to "Caminando"
     )
 
@@ -128,6 +130,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             btnToggleMonitor.text = "Detener Monitoreo"
             tvStatus.text = "Monitoreando..."
             bufferIndex = 0
+            MonitoringLogManager.startSession(this, etPhone.text.toString().trim())
             logInfo("Monitoreo iniciado.")
         } ?: logError("Acelerómetro no disponible.")
     }
@@ -137,6 +140,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         isMonitoring = false
         btnToggleMonitor.text = "Iniciar Monitoreo"
         tvStatus.text = "Detenido"
+        MonitoringLogManager.stopSession(this)
         logInfo("Monitoreo detenido.")
     }
 
@@ -147,6 +151,8 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             featuresBuffer[bufferIndex++] = event.values[0]
             featuresBuffer[bufferIndex++] = event.values[1]
             featuresBuffer[bufferIndex++] = event.values[2]
+
+            MonitoringLogManager.recordSensorData(event.values[0], event.values[1], event.values[2])
 
             if (bufferIndex >= bufferSize) {
                 bufferIndex = 0
@@ -167,18 +173,22 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
         val parts = resultString.split("|")
         if (parts.size == 2) {
-            val label = parts[0]
-            val confidence = parts[1].toFloatOrNull() ?: 0f
+            val label = parts[0].replace("\u0000", "").trim()
+            val confidence = parts[1].replace("\u0000", "").trim().replace(",", ".").toFloatOrNull() ?: 0f
             val percentage = (confidence * 100).roundToInt()
             val translatedLabel = classTranslations[label] ?: label
+            val predictionText = "$translatedLabel ($percentage%)"
 
             runOnUiThread {
-                tvPrediction.text = "Predicción: $translatedLabel ($percentage%)"
+                tvPrediction.text = "Predicción: $predictionText"
             }
 
             logInfo("Inferencia completada: $label ($percentage%)")
+            MonitoringLogManager.updatePrediction(this, predictionText, label)
+            MonitoringLogManager.recordWindow(this)
 
             if (FALL_CLASSES.contains(label) && confidence >= FALL_THRESHOLD) {
+                MonitoringLogManager.recordFall(this)
                 logInfo("Posible caída detectada ($label). Lanzando AlertActivity.")
                 startFallAlert(translatedLabel)
             }
@@ -204,6 +214,28 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             if (isMonitoring) {
                 tvStatus.text = "Monitoreando..."
             }
+        }
+    }
+
+    override fun onDestroy() {
+        if (isMonitoring) {
+            MonitoringLogManager.stopSession(this)
+        }
+        super.onDestroy()
+    }
+
+    override fun onCreateOptionsMenu(menu: Menu?): Boolean {
+        menuInflater.inflate(R.menu.main_menu, menu)
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        return when (item.itemId) {
+            R.id.action_settings -> {
+                startActivity(Intent(this, SettingsActivity::class.java))
+                true
+            }
+            else -> super.onOptionsItemSelected(item)
         }
     }
 
