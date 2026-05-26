@@ -9,9 +9,9 @@
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
-        android:icon="@mipmap/ic_launcher"
+        android:icon="@drawable/edge_impulse_logo"
         android:label="@string/app_name"
-        android:roundIcon="@mipmap/ic_launcher_round"
+        android:roundIcon="@drawable/edge_impulse_logo"
         android:supportsRtl="true"
         android:theme="@style/Theme.AplicacionEdgeImpulse17">
         <activity
@@ -22,6 +22,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity android:name=".SettingsActivity" />
         <activity android:name=".AlertActivity" android:theme="@style/Theme.AppCompat.Light.NoActionBar"/>
     </application>
 
