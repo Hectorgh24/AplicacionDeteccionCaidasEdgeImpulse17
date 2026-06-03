@@ -150,7 +150,7 @@
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Eje X: Tiempo Reciente"
+                android:text="Eje X: Tiempo transcurrido (Segundos)"
                 android:textSize="12sp"
                 android:textStyle="italic"
                 android:gravity="center"

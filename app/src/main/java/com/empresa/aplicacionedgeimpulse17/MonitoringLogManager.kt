@@ -12,6 +12,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import org.json.JSONArray
+import java.util.concurrent.CopyOnWriteArrayList
 
 data class PredictionEvent(
     val timeSeconds: Int,
@@ -33,7 +34,7 @@ data class MonitoringSessionLog(
     val alertsTriggered: Int = 0,
     val emergencyNumber: String = "",
     val currentPrediction: String = "Inactivo",
-    val predictionHistory: MutableList<PredictionEvent> = mutableListOf(),
+    val predictionHistory: MutableList<PredictionEvent> = CopyOnWriteArrayList(),
     @Transient val sensorHistory: MutableList<SensorEventData> = mutableListOf()
 ) {
     val durationSeconds: Long
@@ -113,7 +114,7 @@ data class MonitoringSessionLog(
                 alertsTriggered = json.optInt("alertsTriggered"),
                 emergencyNumber = json.optString("emergencyNumber"),
                 currentPrediction = json.optString("currentPrediction", "Inactivo"),
-                predictionHistory = mutableListOf<PredictionEvent>().apply {
+                predictionHistory = CopyOnWriteArrayList<PredictionEvent>().apply {
                     val arr = json.optJSONArray("predictionHistory")
                     if (arr != null) {
                         for (i in 0 until arr.length()) {
