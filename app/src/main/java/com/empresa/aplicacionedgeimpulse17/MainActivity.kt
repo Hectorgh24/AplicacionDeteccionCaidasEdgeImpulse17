@@ -9,6 +9,8 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.Bundle
+import android.os.CountDownTimer
+import android.os.PowerManager
 import android.util.Log
 import android.view.Menu
 import android.view.MenuItem
@@ -19,6 +21,8 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import kotlin.math.roundToInt
 
 class MainActivity : AppCompatActivity(), SensorEventListener {
@@ -31,6 +35,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private lateinit var btnToggleMonitor: Button
     private lateinit var tvStatus: TextView
     private lateinit var tvPrediction: TextView
+    private lateinit var tvTimer: TextView
 
     // Configuración de Edge Impulse
     private val bufferSize = 300 // EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE (100 samples * 3 axes)
@@ -39,7 +44,16 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
     private val FALL_THRESHOLD = 0.85f // Umbral de confianza
     private var isAlertActive = false
-    
+
+    /** Temporizador de 2 minutos (120 000 ms) para auto-detener la sesión */
+    private var sessionTimer: CountDownTimer? = null
+
+    /** Executor para no bloquear el hilo principal durante la inferencia C++ */
+    private val inferenceExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+
+    /** WakeLock parcial para mantener la CPU activa con la pantalla apagada */
+    private var wakeLock: PowerManager.WakeLock? = null
+
     // Clases que representan caídas
     private val FALL_CLASSES = listOf(
         "fall_backward", "fall_bending", "fall_forward", 
@@ -88,6 +102,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         btnToggleMonitor = findViewById(R.id.btnToggleMonitor)
         tvStatus = findViewById(R.id.tvStatus)
         tvPrediction = findViewById(R.id.tvPrediction)
+        tvTimer = findViewById(R.id.tvTimer)
 
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
@@ -124,6 +139,16 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
     private fun startMonitoring() {
         accelerometer?.let {
+            // Adquirir WakeLock parcial para mantener la CPU activa con pantalla apagada
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = powerManager.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "EdgeImpulse17::MonitoringWakeLock"
+            ).apply {
+                // Timeout de seguridad de 3 minutos (180s) por si algo falla
+                acquire(3 * 60 * 1000L)
+            }
+
             sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
             isMonitoring = true
             isAlertActive = false
@@ -131,17 +156,59 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             tvStatus.text = "Monitoreando..."
             bufferIndex = 0
             MonitoringLogManager.startSession(this, etPhone.text.toString().trim())
-            logInfo("Monitoreo iniciado.")
+            etPhone.isEnabled = false
+            startSessionTimer()
+            logInfo("Monitoreo iniciado (WakeLock adquirido).")
         } ?: logError("Acelerómetro no disponible.")
     }
 
     private fun stopMonitoring() {
+        sessionTimer?.cancel()
+        sessionTimer = null
         sensorManager.unregisterListener(this)
         isMonitoring = false
         btnToggleMonitor.text = "Iniciar Monitoreo"
-        tvStatus.text = "Detenido"
+        tvStatus.text = "Detenido — Puede exportar datos en Ajustes"
+        etPhone.isEnabled = true
         MonitoringLogManager.stopSession(this)
-        logInfo("Monitoreo detenido.")
+
+        // Liberar WakeLock
+        wakeLock?.let {
+            if (it.isHeld) it.release()
+        }
+        wakeLock = null
+
+        logInfo("Monitoreo detenido (WakeLock liberado).")
+    }
+
+    /**
+     * Temporizador de sesión: cuenta regresiva de 120 segundos.
+     * Al llegar a 0, detiene el monitoreo automáticamente guardando todos los datos.
+     */
+    private fun startSessionTimer() {
+        sessionTimer?.cancel()
+        tvTimer.visibility = TextView.VISIBLE
+        sessionTimer = object : CountDownTimer(120_000L, 1_000L) {
+            override fun onTick(millisUntilFinished: Long) {
+                val seconds = (millisUntilFinished / 1000).toInt()
+                MonitoringLogManager.updateRemainingSeconds(seconds)
+                val min = seconds / 60
+                val sec = seconds % 60
+                tvTimer.text = String.format("Tiempo restante: %d:%02d", min, sec)
+            }
+
+            override fun onFinish() {
+                MonitoringLogManager.updateRemainingSeconds(0)
+                tvTimer.text = "Tiempo restante: 0:00"
+                logInfo("Temporizador de 2 minutos completado. Auto-deteniendo monitoreo.")
+                stopMonitoring()
+                Toast.makeText(
+                    this@MainActivity,
+                    "Sesión de 2 minutos completada. Vaya a Ajustes para exportar datos.",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }.start()
     }
 
     override fun onSensorChanged(event: SensorEvent?) {
@@ -156,30 +223,33 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
             if (bufferIndex >= bufferSize) {
                 bufferIndex = 0
-                performInference()
+                // Clonar el buffer para que el hilo de inferencia lo procese sin sobreescrituras
+                val bufferToProcess = featuresBuffer.clone()
+                performInferenceAsync(bufferToProcess)
             }
         }
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
-    private fun performInference() {
-        val resultString = runClassification(featuresBuffer)
+    private fun performInferenceAsync(features: FloatArray) {
+        inferenceExecutor.execute {
+            val resultString = runClassification(features)
 
-        if (resultString.startsWith("ERROR")) {
-            logError("Fallo en inferencia: $resultString")
-            return
-        }
+            if (resultString.startsWith("ERROR")) {
+                logError("Fallo en inferencia: $resultString")
+                return@execute
+            }
 
-        val parts = resultString.split("|")
-        if (parts.size == 2) {
-            val label = parts[0].replace("\u0000", "").trim()
-            val confidence = parts[1].replace("\u0000", "").trim().replace(",", ".").toFloatOrNull() ?: 0f
-            val percentage = (confidence * 100).roundToInt()
-            val translatedLabel = classTranslations[label] ?: label
-            val predictionText = "$translatedLabel ($percentage%)"
+            val parts = resultString.split("|")
+            if (parts.size == 2) {
+                val label = parts[0].replace("\u0000", "").trim()
+                val confidence = parts[1].replace("\u0000", "").trim().replace(",", ".").toFloatOrNull() ?: 0f
+                val percentage = (confidence * 100).roundToInt()
+                val translatedLabel = classTranslations[label] ?: label
+                val predictionText = "$translatedLabel ($percentage%)"
 
-            runOnUiThread {
+                runOnUiThread {
                 tvPrediction.text = "Predicción: $predictionText"
             }
 
@@ -187,10 +257,13 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             MonitoringLogManager.updatePrediction(this, predictionText, label)
             MonitoringLogManager.recordWindow(this)
 
-            if (FALL_CLASSES.contains(label) && confidence >= FALL_THRESHOLD) {
-                MonitoringLogManager.recordFall(this)
-                logInfo("Posible caída detectada ($label). Lanzando AlertActivity.")
-                startFallAlert(translatedLabel)
+                if (FALL_CLASSES.contains(label) && confidence >= FALL_THRESHOLD) {
+                    MonitoringLogManager.recordFall(this@MainActivity)
+                    logInfo("Posible caída detectada ($label). Lanzando AlertActivity.")
+                    runOnUiThread {
+                        startFallAlert(translatedLabel)
+                    }
+                }
             }
         }
     }
@@ -218,9 +291,16 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     }
 
     override fun onDestroy() {
+        sessionTimer?.cancel()
+        sessionTimer = null
         if (isMonitoring) {
             MonitoringLogManager.stopSession(this)
         }
+        // Liberar WakeLock si aún está activo
+        wakeLock?.let {
+            if (it.isHeld) it.release()
+        }
+        wakeLock = null
         super.onDestroy()
     }
 
