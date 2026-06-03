@@ -2,6 +2,7 @@ import json
 import os
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+from matplotlib.animation import FFMpegWriter
 import numpy as np
 
 try:
@@ -58,7 +59,8 @@ def generar_video_predicciones(data, output_path):
 
     duration = data.get("durationSeconds", 30)
     fps = 30
-    fig, ax = plt.subplots(figsize=(12, 6), dpi=200)
+    # 16:9 Aspect Ratio at 120 DPI = 1920x1080 (1080p Exacto)
+    fig, ax = plt.subplots(figsize=(16, 9), dpi=120)
     translated_labels = [CLASS_TRANSLATIONS.get(c, c) for c in CLASS_LIST]
     y_positions = list(range(len(CLASS_LIST)))
     max_window = 60
@@ -146,7 +148,8 @@ def generar_video_acelerometro(data, output_path):
     y_vals = np.array([d["y"] for d in sensor_data], dtype=float)
     z_vals = np.array([d["z"] for d in sensor_data], dtype=float)
 
-    fig, ax = plt.subplots(figsize=(12, 6), dpi=200)
+    # 16:9 Aspect Ratio at 120 DPI = 1920x1080 (1080p Exacto)
+    fig, ax = plt.subplots(figsize=(16, 9), dpi=120)
     fig.patch.set_facecolor('#1E1E1E')
     ax.set_facecolor('#121212')
 
@@ -206,7 +209,13 @@ def generar_video_acelerometro(data, output_path):
 
 def _guardar_animacion(ani, output_path, fps_val):
     try:
-        ani.save(output_path, writer='ffmpeg', fps=fps_val, bitrate=5000)
+        # Configurar FFmpeg para alta calidad y máxima compatibilidad de controles MP4
+        writer = FFMpegWriter(
+            fps=fps_val,
+            bitrate=8000,
+            extra_args=['-vcodec', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'medium', '-profile:v', 'high', '-level', '4.0']
+        )
+        ani.save(output_path, writer=writer)
     except Exception as e1:
         # Fallback a GIF si FFmpeg no esta disponible
         output_gif = output_path.replace(".mp4", ".gif")
