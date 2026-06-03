@@ -13,3 +13,7 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Guías internas y archivos de prueba generados
+edgeimpulse17-Guia_Tecnica_IA.md
+*.json
