@@ -57,7 +57,8 @@ def generar_video_predicciones(data, output_path):
         raise ValueError("El historial de predicciones está vacío.")
 
     duration = data.get("durationSeconds", 30)
-    fig, ax = plt.subplots(figsize=(10, 5), dpi=100)
+    fps = 30
+    fig, ax = plt.subplots(figsize=(12, 6), dpi=200)
     translated_labels = [CLASS_TRANSLATIONS.get(c, c) for c in CLASS_LIST]
     y_positions = list(range(len(CLASS_LIST)))
     max_window = 60
@@ -90,7 +91,8 @@ def generar_video_predicciones(data, output_path):
         return scatter_normal, scatter_fall, time_line
 
     def update(frame):
-        current_predictions = [p for p in history if p['timeSeconds'] <= frame]
+        current_time = frame / fps
+        current_predictions = [p for p in history if p['timeSeconds'] <= current_time]
         norm_points = []
         fall_points = []
 
@@ -115,19 +117,19 @@ def generar_video_predicciones(data, output_path):
         else:
             scatter_fall.set_offsets(np.empty((0, 2)))
 
-        time_line.set_xdata([frame, frame])
+        time_line.set_xdata([current_time, current_time])
 
-        if frame > max_window:
-            ax.set_xlim(frame - max_window, frame)
+        if current_time > max_window:
+            ax.set_xlim(current_time - max_window, current_time)
         else:
             ax.set_xlim(0, max_window)
 
         return scatter_normal, scatter_fall, time_line
 
-    frames_total = int(duration) + 2
-    ani = animation.FuncAnimation(fig, update, frames=frames_total, init_func=init, blit=False, interval=1000)
+    frames_total = int(duration * fps) + (2 * fps)
+    ani = animation.FuncAnimation(fig, update, frames=frames_total, init_func=init, blit=False, interval=1000 // fps)
 
-    _guardar_animacion(ani, output_path)
+    _guardar_animacion(ani, output_path, fps)
     plt.close(fig)
 
 
@@ -137,13 +139,14 @@ def generar_video_acelerometro(data, output_path):
         raise ValueError("El historial del sensor está vacío.")
 
     duration = data.get("durationSeconds", 30)
+    fps = 30
     times_ms = np.array([d["timeOffsetMillis"] for d in sensor_data], dtype=float)
     times_s = times_ms / 1000.0
     x_vals = np.array([d["x"] for d in sensor_data], dtype=float)
     y_vals = np.array([d["y"] for d in sensor_data], dtype=float)
     z_vals = np.array([d["z"] for d in sensor_data], dtype=float)
 
-    fig, ax = plt.subplots(figsize=(10, 5), dpi=100)
+    fig, ax = plt.subplots(figsize=(12, 6), dpi=200)
     fig.patch.set_facecolor('#1E1E1E')
     ax.set_facecolor('#121212')
 
@@ -172,7 +175,7 @@ def generar_video_acelerometro(data, output_path):
         return line_x, line_y, line_z
 
     def update(frame):
-        current_time = float(frame)
+        current_time = frame / fps
         mask = times_s <= current_time
         t_vis = times_s[mask]
         x_vis = x_vals[mask]
@@ -194,20 +197,20 @@ def generar_video_acelerometro(data, output_path):
         line_z.set_data(t_vis, z_vis)
         return line_x, line_y, line_z
 
-    frames_total = int(duration) + 2
-    ani = animation.FuncAnimation(fig, update, frames=frames_total, init_func=init, blit=False, interval=1000)
+    frames_total = int(duration * fps) + (2 * fps)
+    ani = animation.FuncAnimation(fig, update, frames=frames_total, init_func=init, blit=False, interval=1000 // fps)
 
-    _guardar_animacion(ani, output_path)
+    _guardar_animacion(ani, output_path, fps)
     plt.close(fig)
 
 
-def _guardar_animacion(ani, output_path):
+def _guardar_animacion(ani, output_path, fps_val):
     try:
-        ani.save(output_path, writer='ffmpeg', fps=1)
+        ani.save(output_path, writer='ffmpeg', fps=fps_val, bitrate=5000)
     except Exception as e1:
         # Fallback a GIF si FFmpeg no esta disponible
         output_gif = output_path.replace(".mp4", ".gif")
         try:
-            ani.save(output_gif, writer='pillow', fps=1)
+            ani.save(output_gif, writer='pillow', fps=fps_val)
         except Exception as e2:
             raise Exception(f"Fallo MP4: {str(e1)}\n\nFallo GIF: {str(e2)}\n\nAsegurate de que Pillow este instalado.")
