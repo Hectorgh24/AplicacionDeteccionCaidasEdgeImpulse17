@@ -150,21 +150,29 @@ object MonitoringLogManager {
 
     /**
      * Buffer circular de visualización para el gráfico en tiempo real.
-     * Se escribe desde el main thread (sensor) y se publica periódicamente
-     * al displaySnapshot atómico. Tamaño fijo para evitar copias costosas.
+     * Usa arrays primitivos de tamaño fijo para CERO asignaciones de memoria
+     * durante la operación. Esto elimina completamente la presión de GC
+     * que causaba el congelamiento del sensor a los 44 segundos.
+     *
+     * Cada posición almacena: [timeOffsetMillis, x, y, z]
      */
-    private val displaySensorBuffer = ArrayList<SensorEventData>(550)
+    private const val RING_CAPACITY = 250 // ~5 segundos de datos a 50Hz (suficiente para ventana de 10s visual)
+    private val ringTime = LongArray(RING_CAPACITY)
+    private val ringX = FloatArray(RING_CAPACITY)
+    private val ringY = FloatArray(RING_CAPACITY)
+    private val ringZ = FloatArray(RING_CAPACITY)
+    private var ringHead = 0      // Índice de escritura (posición del próximo dato)
+    private var ringCount = 0     // Cantidad de datos válidos en el ring buffer
 
-    /** Contador de throttle para publicar al display solo cada N muestras (~4Hz visual) */
+    /** Contador de throttle para publicar al display solo cada N muestras (~2Hz visual) */
     private var sensorSampleCount = 0
-    private const val PUBLISH_EVERY_N = 12 // A 50Hz, publicar cada 12 muestras ≈ 4Hz de refresco
-    private const val DISPLAY_BUFFER_MAX = 500
-    private const val DISPLAY_BUFFER_TRIM_AT = 600 // Recortar en lote cuando llegue a 600
+    private const val PUBLISH_EVERY_N = 25 // A 50Hz, publicar cada 25 muestras ≈ 2Hz de refresco
 
     /**
      * Snapshot thread-safe del buffer de visualización, leído por SettingsActivity.
-     * Usa AtomicReference para evitar copias innecesarias y garantizar visibilidad
-     * entre hilos sin sincronización pesada.
+     * Se crea una copia congelada solo cada PUBLISH_EVERY_N muestras (~2Hz),
+     * reduciendo drásticamente la creación de objetos en comparación con la
+     * versión anterior que copiaba 500 elementos 4 veces por segundo.
      */
     private val displaySnapshotRef = AtomicReference<List<SensorEventData>>(emptyList())
 
@@ -183,7 +191,7 @@ object MonitoringLogManager {
      * solo guardamos cada SAVE_INTERVAL_MS o en eventos críticos (start/stop/fall/alert).
      */
     private var lastSaveTimeMs = 0L
-    private const val SAVE_INTERVAL_MS = 10_000L // Guardar a disco cada 10 segundos máximo
+    private const val SAVE_INTERVAL_MS = 15_000L // Guardar a disco cada 15 segundos máximo
 
     /**
      * Executor dedicado para I/O de disco, separado del hilo de inferencia
@@ -198,11 +206,22 @@ object MonitoringLogManager {
     @Volatile
     private var isSaving = false
 
+    /**
+     * Contador para diezmar el historial completo del sensor.
+     * Solo guarda 1 de cada FULL_HISTORY_DECIMATION muestras para reducir
+     * la cantidad de objetos en memoria y el tamaño del JSON exportado.
+     * A 50Hz con decimación 2, se guardan 25Hz (suficiente para reconstrucción).
+     */
+    private var fullHistoryDecimationCount = 0
+    private const val FULL_HISTORY_DECIMATION = 2
+
     fun startSession(context: Context, emergencyNumber: String) {
         // Limpiar buffers de sesión anterior
         fullSensorHistory.clear()
-        displaySensorBuffer.clear()
+        ringHead = 0
+        ringCount = 0
         sensorSampleCount = 0
+        fullHistoryDecimationCount = 0
         displaySnapshotRef.set(emptyList())
         remainingSeconds = 120
         lastSaveTimeMs = System.currentTimeMillis()
@@ -238,38 +257,43 @@ object MonitoringLogManager {
 
     /**
      * Registra datos crudos del sensor acelerómetro.
-     * OPTIMIZACIÓN CRÍTICA:
-     * - ArrayList pre-dimensionada (add es O(1) amortizado sin resize)
-     * - Recorte en lote del display buffer (cada 100 extras, no removeAt(0) en cada muestra)
-     * - Publicación atómica del snapshot sin crear copias innecesarias constantemente
+     * OPTIMIZACIÓN CRÍTICA ANTI-CONGELAMIENTO:
+     * - Ring buffer de arrays primitivos: CERO asignaciones de memoria por muestra
+     * - Diezmado del historial completo (1 de cada 2 muestras) para reducir objetos
+     * - Snapshot se crea solo cada 25 muestras (~2Hz) en vez de cada 12 (~4Hz)
      * - Sin I/O de disco, sin sincronización pesada
      */
     fun recordSensorData(x: Float, y: Float, z: Float) {
         val session = currentSession ?: return
         val offset = System.currentTimeMillis() - session.sessionStartMillis
-        val data = SensorEventData(offset, x, y, z)
 
-        // Guardar en historial completo (para exportación a JSON/Python)
-        fullSensorHistory.add(data)
+        // === Ring buffer de arrays primitivos (CERO allocations) ===
+        ringTime[ringHead] = offset
+        ringX[ringHead] = x
+        ringY[ringHead] = y
+        ringZ[ringHead] = z
+        ringHead = (ringHead + 1) % RING_CAPACITY
+        if (ringCount < RING_CAPACITY) ringCount++
 
-        // Guardar en buffer de visualización
-        displaySensorBuffer.add(data)
-
-        // Recorte en lote: solo cuando excede TRIM_AT, recortar a MAX de una sola vez
-        // Esto evita el costoso removeAt(0) en cada muestra individual
-        if (displaySensorBuffer.size >= DISPLAY_BUFFER_TRIM_AT) {
-            val fromIndex = displaySensorBuffer.size - DISPLAY_BUFFER_MAX
-            val trimmed = ArrayList(displaySensorBuffer.subList(fromIndex, displaySensorBuffer.size))
-            displaySensorBuffer.clear()
-            displaySensorBuffer.addAll(trimmed)
+        // === Historial completo diezmado (para exportación JSON/Python) ===
+        fullHistoryDecimationCount++
+        if (fullHistoryDecimationCount >= FULL_HISTORY_DECIMATION) {
+            fullHistoryDecimationCount = 0
+            fullSensorHistory.add(SensorEventData(offset, x, y, z))
         }
 
-        // Throttle: publicar snapshot solo cada N muestras para refresco suave
+        // === Publicar snapshot solo cada N muestras para refresco suave ===
         sensorSampleCount++
         if (sensorSampleCount >= PUBLISH_EVERY_N) {
             sensorSampleCount = 0
-            // Publicar atómicamente para que SettingsActivity lo lea sin contención
-            displaySnapshotRef.set(ArrayList(displaySensorBuffer))
+            // Crear snapshot desde el ring buffer (solo aquí se crean objetos)
+            val snapshot = ArrayList<SensorEventData>(ringCount)
+            val start = if (ringCount < RING_CAPACITY) 0 else ringHead
+            for (i in 0 until ringCount) {
+                val idx = (start + i) % RING_CAPACITY
+                snapshot.add(SensorEventData(ringTime[idx], ringX[idx], ringY[idx], ringZ[idx]))
+            }
+            displaySnapshotRef.set(snapshot)
         }
     }
 

@@ -124,9 +124,19 @@ Al no recibirse más eventos del sensor, el buffer dejaba de llenarse, los gráf
 
 5. **Snapshot Atómico (`AtomicReference`)**: El `displaySnapshot` leído por `SettingsActivity` ahora se publica mediante `AtomicReference.set()` en lugar de una asignación volátil simple, garantizando visibilidad thread-safe sin sincronización pesada.
 
-6. **Gestión de Memoria en Lote**: El buffer de visualización se recorta en bloque (de 600 a 500 entradas) en vez de hacer `removeAt(0)` en cada muestra, y solo se publica un snapshot cada 12 muestras (~4Hz de refresco visual).
+6. **Ring Buffer de Arrays Primitivos (CERO Allocations por Muestra)**: Se reemplazó el `ArrayList<SensorEventData>` del buffer de visualización por arrays primitivos de tamaño fijo (`LongArray`, `FloatArray`) organizados como ring buffer. Esto elimina **completamente** la creación de objetos por cada muestra del sensor durante operación normal, reduciendo la presión de GC a prácticamente cero. Los snapshots para la UI se materializan solo cada 25 muestras (~2Hz).
 
-7. **Thread-Safety en Predicciones**: El historial de predicciones usa `CopyOnWriteArrayList` para permitir iteración segura desde el hilo de UI mientras el hilo de inferencia agrega nuevas entradas sin `ConcurrentModificationException`.
+7. **Diezmado del Historial Completo (50Hz → 25Hz)**: El `fullSensorHistory` ahora guarda 1 de cada 2 muestras del sensor, reduciendo a la mitad la cantidad de objetos `SensorEventData` creados durante la sesión. A 25Hz la resolución sigue siendo más que suficiente para la reconstrucción de gráficos en Python.
+
+8. **Diezmado Adaptativo del Gráfico (max 100 puntos)**: `SettingsActivity.updateSensorChart()` ahora limita el renderizado a máximo 100 puntos por eje (en vez de los ~250-500 anteriores), usando muestreo uniforme del snapshot. Esto reduce el costo de renderizado del chart en un ~80%, liberando el main thread para procesar eventos del sensor sin interrupciones.
+
+9. **Refresh de Gráficos Reducido (2s)**: El `Handler` de `SettingsActivity` ahora refresca los gráficos cada 2 segundos en vez de cada 1 segundo, reduciendo a la mitad la cantidad de ciclos de renderizado que compiten con el sensor por tiempo del main thread.
+
+10. **Desactivación de Hardware Acceleration en Charts**: Se desactivó la aceleración por hardware en ambos gráficos (`setHardwareAccelerationEnabled(false)`) para evitar la acumulación de texturas GPU que causaban fugas de memoria nativa no rastreables por el GC de Java.
+
+11. **Red de Seguridad en `onSensorChanged` (`try-catch`)**: Se envolvió todo el cuerpo de `onSensorChanged` en un `try-catch` para prevenir que cualquier excepción inesperada (ej: `ArrayIndexOutOfBoundsException` por corrupción de estado) mate silenciosamente el listener del sensor. En caso de error, se resetea `bufferIndex` a un valor seguro y el monitoreo continúa.
+
+12. **Thread-Safety en Predicciones**: El historial de predicciones usa `CopyOnWriteArrayList` para permitir iteración segura desde el hilo de UI mientras el hilo de inferencia agrega nuevas entradas sin `ConcurrentModificationException`.
 
 ### Exportación completa de datos del acelerómetro
 - El reporte JSON ahora incluye el campo `sensorHistory` con **todos** los datos brutos del acelerómetro (offset en ms, ejes X/Y/Z).

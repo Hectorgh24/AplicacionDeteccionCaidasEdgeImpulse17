@@ -71,7 +71,7 @@ class SettingsActivity : AppCompatActivity() {
     private val refreshTask = object : Runnable {
         override fun run() {
             renderSession()
-            refreshHandler.postDelayed(this, 1000L)
+            refreshHandler.postDelayed(this, 2000L) // Refrescar cada 2 segundos para no saturar el main thread
         }
     }
 
@@ -127,6 +127,9 @@ class SettingsActivity : AppCompatActivity() {
         sensorChart.isDragEnabled = true
         sensorChart.setScaleEnabled(true)
         sensorChart.setPinchZoom(true)
+
+        // Desactivar hardware acceleration en el chart para reducir presión de GPU/memoria
+        sensorChart.setHardwareAccelerationEnabled(false)
         
         val xAxis = sensorChart.xAxis
         xAxis.position = XAxis.XAxisPosition.BOTTOM
@@ -155,6 +158,9 @@ class SettingsActivity : AppCompatActivity() {
         timelineChart.isDragEnabled = true
         timelineChart.setScaleEnabled(true)
         timelineChart.setPinchZoom(true)
+
+        // Desactivar hardware acceleration para reducir presión de memoria
+        timelineChart.setHardwareAccelerationEnabled(false)
         
         val xAxis = timelineChart.xAxis
         xAxis.position = XAxis.XAxisPosition.BOTTOM
@@ -225,8 +231,9 @@ class SettingsActivity : AppCompatActivity() {
 
     /**
      * Actualiza el gráfico del acelerómetro usando el snapshot del display buffer
-     * (ya throttleado a ~4Hz por MonitoringLogManager), evitando que se congele.
-     * Para sesiones cargadas del disco (ya finalizadas), usa el sensorHistory de la sesión.
+     * (ya throttleado a ~2Hz por MonitoringLogManager).
+     * OPTIMIZACIÓN: Diezmado adaptativo para limitar a ~100 puntos por eje,
+     * reduciendo drásticamente el costo de renderizado del chart.
      */
     private fun updateSensorChart() {
         // Usar el snapshot throttleado si hay sesión activa, o sensorHistory de sesión guardada
@@ -236,20 +243,35 @@ class SettingsActivity : AppCompatActivity() {
                 ?: emptyList()
         }
 
-        val entriesX = ArrayList<Entry>()
-        val entriesY = ArrayList<Entry>()
-        val entriesZ = ArrayList<Entry>()
-        
-        for (sensorEvent in sensorData) {
-            val t = sensorEvent.timeOffsetMillis / 1000f
-            entriesX.add(Entry(t, sensorEvent.x))
-            entriesY.add(Entry(t, sensorEvent.y))
-            entriesZ.add(Entry(t, sensorEvent.z))
-        }
-        
-        if (entriesX.isEmpty()) {
+        if (sensorData.isEmpty()) {
             sensorChart.clear()
             return
+        }
+
+        // Diezmado adaptativo: si hay más de MAX_CHART_POINTS, tomar 1 de cada N
+        val maxChartPoints = 100
+        val step = maxOf(1, sensorData.size / maxChartPoints)
+
+        val entriesX = ArrayList<Entry>(maxChartPoints + 1)
+        val entriesY = ArrayList<Entry>(maxChartPoints + 1)
+        val entriesZ = ArrayList<Entry>(maxChartPoints + 1)
+
+        var i = 0
+        while (i < sensorData.size) {
+            val ev = sensorData[i]
+            val t = ev.timeOffsetMillis / 1000f
+            entriesX.add(Entry(t, ev.x))
+            entriesY.add(Entry(t, ev.y))
+            entriesZ.add(Entry(t, ev.z))
+            i += step
+        }
+        // Siempre incluir el último punto para que el gráfico llegue al tiempo actual
+        val last = sensorData.last()
+        val lastT = last.timeOffsetMillis / 1000f
+        if (entriesX.isEmpty() || entriesX.last().x != lastT) {
+            entriesX.add(Entry(lastT, last.x))
+            entriesY.add(Entry(lastT, last.y))
+            entriesZ.add(Entry(lastT, last.z))
         }
 
         if (sensorChart.data != null && sensorChart.data.dataSetCount == 3) {

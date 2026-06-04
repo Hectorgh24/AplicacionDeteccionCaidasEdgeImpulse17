@@ -223,26 +223,35 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     override fun onSensorChanged(event: SensorEvent?) {
         if (event == null || !isMonitoring || isAlertActive) return
 
-        if (event.sensor.type == Sensor.TYPE_ACCELEROMETER) {
-            featuresBuffer[bufferIndex++] = event.values[0]
-            featuresBuffer[bufferIndex++] = event.values[1]
-            featuresBuffer[bufferIndex++] = event.values[2]
+        try {
+            if (event.sensor.type == Sensor.TYPE_ACCELEROMETER) {
+                val x = event.values[0]
+                val y = event.values[1]
+                val z = event.values[2]
 
-            MonitoringLogManager.recordSensorData(event.values[0], event.values[1], event.values[2])
+                featuresBuffer[bufferIndex++] = x
+                featuresBuffer[bufferIndex++] = y
+                featuresBuffer[bufferIndex++] = z
 
-            if (bufferIndex >= bufferSize) {
-                bufferIndex = 0
+                MonitoringLogManager.recordSensorData(x, y, z)
 
-                // Solo enviar si no hay inferencia en progreso para evitar acumulación de tareas.
-                // Si la inferencia anterior no ha terminado, se descarta esta ventana.
-                // Esto previene la saturación del executor que causa congelamiento progresivo.
-                if (inferenceInProgress.compareAndSet(false, true)) {
-                    val bufferToProcess = featuresBuffer.clone()
-                    performInferenceAsync(bufferToProcess)
-                } else {
-                    logInfo("Inferencia anterior aún en progreso — ventana descartada.")
+                if (bufferIndex >= bufferSize) {
+                    bufferIndex = 0
+
+                    // Solo enviar si no hay inferencia en progreso para evitar acumulación de tareas.
+                    // Si la inferencia anterior no ha terminado, se descarta esta ventana.
+                    // Esto previene la saturación del executor que causa congelamiento progresivo.
+                    if (inferenceInProgress.compareAndSet(false, true)) {
+                        val bufferToProcess = featuresBuffer.clone()
+                        performInferenceAsync(bufferToProcess)
+                    }
                 }
             }
+        } catch (e: Exception) {
+            logError("Error en onSensorChanged: ${e.message}")
+            // Resetear bufferIndex a un múltiplo de 3 válido para recuperarse
+            bufferIndex = (bufferIndex / 3) * 3
+            if (bufferIndex >= bufferSize) bufferIndex = 0
         }
     }
 
