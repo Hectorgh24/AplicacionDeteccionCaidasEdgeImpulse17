@@ -98,14 +98,35 @@ Mejoras implementadas para garantizar una operación confiable del monitoreo y u
 - Se liberan correctamente tanto en `stopMonitoring()` como en `onDestroy()`.
 - Se agregó el permiso `WAKE_LOCK` al `AndroidManifest.xml`.
 
-### Optimización Extrema de Rendimiento (Anti-Congelamiento)
-Para solucionar el problema de "congelamiento" del hilo principal y la aplicación al alcanzar el segundo 20, se implementaron las siguientes optimizaciones críticas:
+### Optimización Extrema de Rendimiento (Anti-Congelamiento v2)
 
-1. **Gestión de Memoria en Lote (`ArrayList`)**: Se reemplazó el uso costoso de `CopyOnWriteArrayList` (que clonaba arreglos enteros 50 veces por segundo, saturando la RAM) por un `ArrayList` estándar ultrarrápido. El recorte del historial del gráfico (buffer circular) ahora se realiza "en bloque" (cuando llega a 600, recorta a 500) evitando la costosa operación de `removeAt(0)` en cada muestra.
-2. **Inferencia Asíncrona (Hilo en Segundo Plano)**: La inferencia matemática del modelo en C/C++ de Edge Impulse (`runClassification`) bloqueaba el hilo principal. Ahora se ejecuta en un `ExecutorService` de fondo. Al modelo se le pasa un clon exacto (`clone()`) de los datos del sensor para que no haya problemas de concurrencia mientras el acelerómetro sigue llenando la siguiente ventana de manera ininterrumpida.
-3. **Control de Escritura en Disco (Debounce)**: Anteriormente el JSON se escribía en la memoria del dispositivo en cada ciclo de inferencia. Ahora cuenta con un temporizador `SAVE_INTERVAL_MS`, lo que limita la persistencia del archivo a solo una vez cada 10 segundos, liberando completamente al hilo principal de operaciones de Entrada/Salida (I/O).
-4. **Throttle de Gráficos (4Hz)**: La pantalla lee un snapshot preparado (`displaySnapshot`) solo cada 12 muestras, refrescando visualmente los gráficos a 4Hz para que la vista del usuario sea suave y no sobrecargue la UI de Android.
-5. **Thread-Safety en Predicciones**: Para evitar colapsos de interfaz y congelamiento total de la pantalla (`ConcurrentModificationException`) al momento en que el hilo de inferencia asíncrono registra una predicción exactamente en el mismo milisegundo que el hilo de la UI intenta dibujarla, se protegió el historial con una `CopyOnWriteArrayList`, garantizando estabilidad ininterrumpida.
+Se identificó y resolvió un bug crítico donde la aplicación se congelaba completamente alrededor del segundo 8-9 de monitoreo: los gráficos de clasificación y acelerómetro dejaban de actualizarse, y la detección de caídas se detenía (sin alertas), aunque el cronómetro de sesión seguía avanzando hasta los 120 segundos. A continuación se documenta la causa raíz y todas las correcciones aplicadas:
+
+#### Causa Raíz: Saturación del Executor de Inferencia
+
+El modelo Edge Impulse de 17 clases ejecuta inferencia en C++ vía JNI, lo cual puede tomar más de 2 segundos por ventana en dispositivos móviles. Como el buffer del sensor se llena cada ~2 segundos (100 muestras × 3 ejes a ~50Hz), el `ExecutorService` de un solo hilo recibía nuevas tareas de inferencia al mismo ritmo (o más rápido) de lo que podía procesarlas. Esto causaba una **cola infinita de tareas** que:
+
+1. Saturaba la memoria con clones del buffer acumulados en la cola.
+2. Impedía que las callbacks de post-inferencia (registro de predicción, detección de caída) se ejecutaran a tiempo.
+3. Provocaba presión de GC extrema que terminaba bloqueando la entrega de eventos del sensor por parte del sistema Android.
+
+Al no recibirse más eventos del sensor, el buffer dejaba de llenarse, los gráficos se congelaban y la detección de caídas se detenía permanentemente.
+
+#### Correcciones Implementadas
+
+1. **Gate Atómico Anti-Saturación (`AtomicBoolean`)**: Se agregó un flag `inferenceInProgress` de tipo `AtomicBoolean` en `MainActivity`. Antes de enviar una nueva tarea al executor, se verifica con `compareAndSet(false, true)`. Si la inferencia anterior aún no ha terminado, la ventana actual se **descarta** en vez de acumularse en la cola. El flag se libera en un bloque `finally` para garantizar recuperación incluso ante errores. Esto previene completamente la acumulación de tareas.
+
+2. **I/O de Disco Asíncrono Dedicado**: El guardado periódico a disco (`saveCurrentSession`) se movió a un `ioExecutor` separado del hilo de inferencia. Anteriormente, la serialización JSON y escritura a archivo se ejecutaban dentro del mismo `ExecutorService` de inferencia, retrasándolo aún más. Ahora la inferencia no se bloquea por I/O. Se usa un flag `isSaving` para evitar acumular múltiples escrituras pendientes.
+
+3. **Sincronización Completa de Sesión**: Todos los métodos que mutan `currentSession` via `.copy()` (`recordWindow`, `recordFall`, `recordAlert`, `updatePrediction`, `stopSession`) ahora están protegidos con `@Synchronized` sobre el objeto `MonitoringLogManager`. Esto elimina race conditions entre el hilo principal (sensor), el hilo de inferencia y el hilo de I/O que podían corromper el estado de la sesión.
+
+4. **Pre-dimensionamiento de Buffers**: `fullSensorHistory` se inicializa con capacidad para 7000 entradas (50Hz × 120s + margen) para eliminar los costosos re-dimensionamientos de `ArrayList` que generaban arrays temporales grandes y presión de GC.
+
+5. **Snapshot Atómico (`AtomicReference`)**: El `displaySnapshot` leído por `SettingsActivity` ahora se publica mediante `AtomicReference.set()` en lugar de una asignación volátil simple, garantizando visibilidad thread-safe sin sincronización pesada.
+
+6. **Gestión de Memoria en Lote**: El buffer de visualización se recorta en bloque (de 600 a 500 entradas) en vez de hacer `removeAt(0)` en cada muestra, y solo se publica un snapshot cada 12 muestras (~4Hz de refresco visual).
+
+7. **Thread-Safety en Predicciones**: El historial de predicciones usa `CopyOnWriteArrayList` para permitir iteración segura desde el hilo de UI mientras el hilo de inferencia agrega nuevas entradas sin `ConcurrentModificationException`.
 
 ### Exportación completa de datos del acelerómetro
 - El reporte JSON ahora incluye el campo `sensorHistory` con **todos** los datos brutos del acelerómetro (offset en ms, ejes X/Y/Z).

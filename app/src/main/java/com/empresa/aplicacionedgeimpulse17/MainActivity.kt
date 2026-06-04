@@ -23,6 +23,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
 
 class MainActivity : AppCompatActivity(), SensorEventListener {
@@ -50,6 +51,13 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
     /** Executor para no bloquear el hilo principal durante la inferencia C++ */
     private val inferenceExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+
+    /**
+     * Flag atómico para evitar saturar el executor con tareas de inferencia.
+     * Si una inferencia está en progreso, la siguiente ventana se descarta.
+     * Esto previene la acumulación de tareas que causa congelamiento progresivo.
+     */
+    private val inferenceInProgress = AtomicBoolean(false)
 
     /** WakeLock parcial para mantener la CPU activa con la pantalla apagada */
     private var wakeLock: PowerManager.WakeLock? = null
@@ -152,6 +160,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
             isMonitoring = true
             isAlertActive = false
+            inferenceInProgress.set(false)
             btnToggleMonitor.text = "Detener Monitoreo"
             tvStatus.text = "Monitoreando..."
             bufferIndex = 0
@@ -223,47 +232,71 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
             if (bufferIndex >= bufferSize) {
                 bufferIndex = 0
-                // Clonar el buffer para que el hilo de inferencia lo procese sin sobreescrituras
-                val bufferToProcess = featuresBuffer.clone()
-                performInferenceAsync(bufferToProcess)
+
+                // Solo enviar si no hay inferencia en progreso para evitar acumulación de tareas.
+                // Si la inferencia anterior no ha terminado, se descarta esta ventana.
+                // Esto previene la saturación del executor que causa congelamiento progresivo.
+                if (inferenceInProgress.compareAndSet(false, true)) {
+                    val bufferToProcess = featuresBuffer.clone()
+                    performInferenceAsync(bufferToProcess)
+                } else {
+                    logInfo("Inferencia anterior aún en progreso — ventana descartada.")
+                }
             }
         }
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
+    /**
+     * Ejecuta la inferencia del modelo Edge Impulse en un hilo de fondo.
+     * Al terminar, actualiza la UI y libera el flag atómico para permitir
+     * la siguiente inferencia. Toda la lógica post-inferencia (actualización
+     * de predicción, registro de ventana, detección de caída) se ejecuta
+     * dentro del bloque del executor para evitar bloquear el main thread.
+     */
     private fun performInferenceAsync(features: FloatArray) {
         inferenceExecutor.execute {
-            val resultString = runClassification(features)
+            try {
+                val resultString = runClassification(features)
 
-            if (resultString.startsWith("ERROR")) {
-                logError("Fallo en inferencia: $resultString")
-                return@execute
-            }
+                if (resultString.startsWith("ERROR")) {
+                    logError("Fallo en inferencia: $resultString")
+                    return@execute
+                }
 
-            val parts = resultString.split("|")
-            if (parts.size == 2) {
-                val label = parts[0].replace("\u0000", "").trim()
-                val confidence = parts[1].replace("\u0000", "").trim().replace(",", ".").toFloatOrNull() ?: 0f
-                val percentage = (confidence * 100).roundToInt()
-                val translatedLabel = classTranslations[label] ?: label
-                val predictionText = "$translatedLabel ($percentage%)"
+                val parts = resultString.split("|")
+                if (parts.size == 2) {
+                    val label = parts[0].replace("\u0000", "").trim()
+                    val confidence = parts[1].replace("\u0000", "").trim().replace(",", ".").toFloatOrNull() ?: 0f
+                    val percentage = (confidence * 100).roundToInt()
+                    val translatedLabel = classTranslations[label] ?: label
+                    val predictionText = "$translatedLabel ($percentage%)"
 
-                runOnUiThread {
-                tvPrediction.text = "Predicción: $predictionText"
-            }
-
-            logInfo("Inferencia completada: $label ($percentage%)")
-            MonitoringLogManager.updatePrediction(this, predictionText, label)
-            MonitoringLogManager.recordWindow(this)
-
-                if (FALL_CLASSES.contains(label) && confidence >= FALL_THRESHOLD) {
-                    MonitoringLogManager.recordFall(this@MainActivity)
-                    logInfo("Posible caída detectada ($label). Lanzando AlertActivity.")
+                    // Actualizar UI en el main thread
                     runOnUiThread {
-                        startFallAlert(translatedLabel)
+                        tvPrediction.text = "Predicción: $predictionText"
+                    }
+
+                    logInfo("Inferencia completada: $label ($percentage%)")
+
+                    // Registrar predicción y ventana (sincronizado internamente en MonitoringLogManager)
+                    MonitoringLogManager.updatePrediction(this@MainActivity, predictionText, label)
+                    MonitoringLogManager.recordWindow(this@MainActivity)
+
+                    // Detectar caída
+                    if (FALL_CLASSES.contains(label) && confidence >= FALL_THRESHOLD) {
+                        MonitoringLogManager.recordFall(this@MainActivity)
+                        logInfo("Posible caída detectada ($label). Lanzando AlertActivity.")
+                        runOnUiThread {
+                            startFallAlert(translatedLabel)
+                        }
                     }
                 }
+            } finally {
+                // SIEMPRE liberar el flag para permitir la siguiente inferencia,
+                // incluso si hubo un error o excepción.
+                inferenceInProgress.set(false)
             }
         }
     }
