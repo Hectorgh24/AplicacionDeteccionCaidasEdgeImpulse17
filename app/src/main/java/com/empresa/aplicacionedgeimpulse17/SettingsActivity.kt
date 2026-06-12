@@ -134,7 +134,13 @@ class SettingsActivity : AppCompatActivity() {
         val xAxis = sensorChart.xAxis
         xAxis.position = XAxis.XAxisPosition.BOTTOM
         xAxis.setDrawGridLines(true)
+        xAxis.granularity = 1f
         xAxis.textColor = textColorPrimary
+        xAxis.valueFormatter = object : ValueFormatter() {
+            override fun getFormattedValue(value: Float): String {
+                return "${value.toInt()}s"
+            }
+        }
         
         val yAxis = sensorChart.axisLeft
         yAxis.setDrawGridLines(true)
@@ -167,6 +173,11 @@ class SettingsActivity : AppCompatActivity() {
         xAxis.setDrawGridLines(true)
         xAxis.granularity = 1f
         xAxis.textColor = textColorPrimary
+        xAxis.valueFormatter = object : ValueFormatter() {
+            override fun getFormattedValue(value: Float): String {
+                return "${value.toInt()}s"
+            }
+        }
         
         val yAxis = timelineChart.axisLeft
         yAxis.granularity = 1f

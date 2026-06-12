@@ -2,6 +2,7 @@ import json
 import os
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+import matplotlib.ticker as ticker
 from matplotlib.animation import FFMpegWriter
 import numpy as np
 
@@ -63,7 +64,7 @@ def generar_video_predicciones(data, output_path):
     fig, ax = plt.subplots(figsize=(16, 9), dpi=120)
     translated_labels = [CLASS_TRANSLATIONS.get(c, c) for c in CLASS_LIST]
     y_positions = list(range(len(CLASS_LIST)))
-    max_window = 60
+    max_window = 15  # Reducir la ventana a 15 segundos para dar mayor espacio visual entre los números de 1 segundo
 
     fig.patch.set_facecolor('#1E1E1E')
     ax.set_facecolor('#121212')
@@ -74,6 +75,8 @@ def generar_video_predicciones(data, output_path):
 
     ax.set_title("Línea de Tiempo - Edge Impulse (17 Clases)", color='#FFFFFF', fontsize=12, fontweight='bold', pad=15)
     ax.set_xlabel("Tiempo (segundos)", color='#E0E0E0', fontsize=10, labelpad=10)
+    ax.xaxis.set_major_locator(ticker.MultipleLocator(1))
+    ax.tick_params(axis='x', rotation=45) # Rotar ligeramente por si llegan a decenas/centenas
     ax.grid(True, which='both', color='#2C2C2C', linestyle='--', linewidth=0.5)
 
     scatter_normal = ax.scatter([], [], color='#00E5FF', s=50, label='Actividades normales', edgecolors='none')
@@ -157,6 +160,7 @@ def generar_video_acelerometro(data, output_path):
     ax.set_xlabel("Tiempo (segundos)", color='#E0E0E0', fontsize=10, labelpad=10)
     ax.set_ylabel("Aceleración (m/s²)", color='#E0E0E0', fontsize=10, labelpad=10)
     ax.set_ylim(-25, 25)
+    ax.xaxis.set_major_locator(ticker.MultipleLocator(1))
     ax.tick_params(colors='#E0E0E0')
     ax.grid(True, color='#2C2C2C', linestyle='--', linewidth=0.5)
 
@@ -208,18 +212,33 @@ def generar_video_acelerometro(data, output_path):
 
 
 def _guardar_animacion(ani, output_path, fps_val):
+    # Intentar primero con aceleración por hardware (NVIDIA GPU - NVENC) para mayor velocidad
     try:
-        # Configurar FFmpeg para alta calidad y máxima compatibilidad de controles MP4
-        writer = FFMpegWriter(
+        writer_nvenc = FFMpegWriter(
             fps=fps_val,
             bitrate=8000,
-            extra_args=['-vcodec', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'medium', '-profile:v', 'high', '-level', '4.0']
+            extra_args=['-vcodec', 'h264_nvenc', '-pix_fmt', 'yuv420p', '-preset', 'fast']
         )
-        ani.save(output_path, writer=writer)
+        ani.save(output_path, writer=writer_nvenc)
+        print("Video guardado usando aceleracion de hardware (NVENC).")
+        return
+    except Exception as e_nvenc:
+        print(f"No se pudo usar NVENC (Posiblemente no hay GPU NVIDIA): {e_nvenc}. Usando CPU...")
+        pass # Continuar con el fallback a CPU
+
+    # Fallback a CPU (libx264) optimizado con 'ultrafast' para reducir drasticamente el tiempo de procesamiento
+    try:
+        writer_cpu = FFMpegWriter(
+            fps=fps_val,
+            bitrate=8000,
+            extra_args=['-vcodec', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'ultrafast', '-profile:v', 'high', '-level', '4.0']
+        )
+        ani.save(output_path, writer=writer_cpu)
+        print("Video guardado usando CPU (libx264 ultrafast).")
     except Exception as e1:
         # Fallback a GIF si FFmpeg no esta disponible
         output_gif = output_path.replace(".mp4", ".gif")
         try:
             ani.save(output_gif, writer='pillow', fps=fps_val)
         except Exception as e2:
-            raise Exception(f"Fallo MP4: {str(e1)}\n\nFallo GIF: {str(e2)}\n\nAsegurate de que Pillow este instalado.")
+            raise Exception(f"Fallo NVENC/MP4: {str(e1)}\n\nFallo GIF: {str(e2)}\n\nAsegurate de que Pillow este instalado.")

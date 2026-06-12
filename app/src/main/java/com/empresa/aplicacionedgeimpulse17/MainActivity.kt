@@ -236,15 +236,25 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 MonitoringLogManager.recordSensorData(x, y, z)
 
                 if (bufferIndex >= bufferSize) {
-                    bufferIndex = 0
-
                     // Solo enviar si no hay inferencia en progreso para evitar acumulación de tareas.
                     // Si la inferencia anterior no ha terminado, se descarta esta ventana.
                     // Esto previene la saturación del executor que causa congelamiento progresivo.
                     if (inferenceInProgress.compareAndSet(false, true)) {
                         val bufferToProcess = featuresBuffer.clone()
                         performInferenceAsync(bufferToProcess)
+                    } else {
+                        // Si se descarta la ventana porque la inferencia anterior no ha terminado,
+                        // registramos una predicción duplicada para mantener los intervalos de 1 segundo
+                        // exactos tanto en el gráfico como en el archivo JSON exportado.
+                        MonitoringLogManager.recordDuplicatePrediction(this@MainActivity)
                     }
+
+                    // Sliding window: Avanzar 1 segundo (50 muestras * 3 ejes = 150 floats)
+                    // Esto permite generar predicciones y guardarlas cada segundo.
+                    val shiftElements = 150
+                    val remainElements = bufferSize - shiftElements
+                    System.arraycopy(featuresBuffer, shiftElements, featuresBuffer, 0, remainElements)
+                    bufferIndex = remainElements
                 }
             }
         } catch (e: Exception) {

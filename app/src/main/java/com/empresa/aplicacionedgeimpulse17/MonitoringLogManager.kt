@@ -140,6 +140,9 @@ object MonitoringLogManager {
     @Volatile
     private var currentSession: MonitoringSessionLog? = null
 
+    @Volatile
+    private var lastClassName: String = "walk"
+
     /**
      * Lista completa de datos del sensor para guardar en el JSON final.
      * Se escribe exclusivamente desde el hilo del sensor (main thread)
@@ -305,8 +308,22 @@ object MonitoringLogManager {
     @Synchronized
     fun updatePrediction(context: Context, prediction: String, className: String) {
         currentSession?.let {
+            lastClassName = className
             it.predictionHistory.add(PredictionEvent(it.durationSeconds.toInt(), className))
             currentSession = it.copy(currentPrediction = prediction)
+            saveIfNeeded(context) // Guardado periódico
+        }
+    }
+
+    /**
+     * Registra una predicción duplicada usando la última clase conocida.
+     * Esto asegura que el gráfico y el JSON mantengan intervalos exactos de 1 segundo
+     * incluso si el motor de inferencia está saturado y descarta una ventana.
+     */
+    @Synchronized
+    fun recordDuplicatePrediction(context: Context) {
+        currentSession?.let {
+            it.predictionHistory.add(PredictionEvent(it.durationSeconds.toInt(), lastClassName))
             saveIfNeeded(context) // Guardado periódico
         }
     }
