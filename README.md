@@ -202,3 +202,10 @@ Esta aplicación fue modificada para operar simultáneamente con otros 3 modelos
 2. **ForegroundServiceType dataSync**: Declaración de tipo de servicio dataSync obligatorio en el AndroidManifest.xml, previniendo excepciones de seguridad al minimizar la app.
 3. **Resiliencia en onResume**: Se ancló la ejecución del servicio al método onResume() en la interfaz principal, garantizando que el socket UDP nunca se duerma.
 4. **Sincronización UDP Centralizada**: Integración con un orquestador externo en Python que dicta los tiempos exactos de la caída a través del puerto 50000.
+
+### ⏱️ Rendimiento de Generación de Videos (Aceleración AMF)
+Durante las pruebas de campo en un equipo HP Victus (AMD Radeon RX 6550M), el renderizado de gráficos de la telemetría tardó lo siguiente:
+* **Video de Línea de Tiempo (Predicciones)**: ~49 minutos (240.49 MB)
+* **Video de Acelerómetro (Ejes X,Y,Z)**: ~30 minutos (94.07 MB)
+* **Tiempo Total por Ciclo (120s)**: ~1 hora y 19 minutos.
+> Nota: Renderizar 17 clases concurrentes demanda un procesamiento gráfico exhaustivo en el hilo principal antes de la compresión por la tarjeta de video dedicada.
