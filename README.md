@@ -192,3 +192,13 @@ python interfaz_grafica.py
 
 Autor: Hector (Licenciatura en Tecnologías Computacionales)  
 Última actualización: Junio 2026
+
+
+## 🔬 Integración con Orquestador Multimodelo (Actualización)
+Esta aplicación fue modificada para operar simultáneamente con otros 3 modelos de Inteligencia Artificial en un solo dispositivo (Poco F7) durante protocolos de investigación científica.
+
+### Mejoras Críticas Implementadas:
+1. **Compatibilidad Estricta Android 14 (DummyForegroundService)**: Implementación total del servicio en segundo plano con banderas y comprobaciones explícitas de Build.VERSION_CODES.Q para mantener vivo el hilo del sensor.
+2. **ForegroundServiceType dataSync**: Declaración de tipo de servicio dataSync obligatorio en el AndroidManifest.xml, previniendo excepciones de seguridad al minimizar la app.
+3. **Resiliencia en onResume**: Se ancló la ejecución del servicio al método onResume() en la interfaz principal, garantizando que el socket UDP nunca se duerma.
+4. **Sincronización UDP Centralizada**: Integración con un orquestador externo en Python que dicta los tiempos exactos de la caída a través del puerto 50000.
