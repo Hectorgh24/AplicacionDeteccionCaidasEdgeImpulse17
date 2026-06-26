@@ -70,7 +70,11 @@ class SettingsActivity : AppCompatActivity() {
     private val refreshHandler = Handler(Looper.getMainLooper())
     private val refreshTask = object : Runnable {
         override fun run() {
-            renderSession()
+            try {
+                renderSession()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
             refreshHandler.postDelayed(this, 2000L) // Refrescar cada 2 segundos para no saturar el main thread
         }
     }
@@ -134,7 +138,7 @@ class SettingsActivity : AppCompatActivity() {
         val xAxis = sensorChart.xAxis
         xAxis.position = XAxis.XAxisPosition.BOTTOM
         xAxis.setDrawGridLines(true)
-        xAxis.granularity = 1f
+        xAxis.labelCount = 5
         xAxis.textColor = textColorPrimary
         xAxis.valueFormatter = object : ValueFormatter() {
             override fun getFormattedValue(value: Float): String {
@@ -171,7 +175,7 @@ class SettingsActivity : AppCompatActivity() {
         val xAxis = timelineChart.xAxis
         xAxis.position = XAxis.XAxisPosition.BOTTOM
         xAxis.setDrawGridLines(true)
-        xAxis.granularity = 1f
+        xAxis.labelCount = 5
         xAxis.textColor = textColorPrimary
         xAxis.valueFormatter = object : ValueFormatter() {
             override fun getFormattedValue(value: Float): String {

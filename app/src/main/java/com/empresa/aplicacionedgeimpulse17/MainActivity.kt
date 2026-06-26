@@ -1,5 +1,9 @@
 package com.empresa.aplicacionedgeimpulse17
 
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import kotlin.concurrent.thread
+
 import android.Manifest
 import android.content.Context
 import android.content.Intent
@@ -104,6 +108,8 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        try { androidx.core.content.ContextCompat.startForegroundService(this, android.content.Intent(this, DummyForegroundService::class.java)) } catch (e: Exception) {}
+        startUdpListener()
         setContentView(R.layout.activity_main)
 
         etPhone = findViewById(R.id.etPhone)
@@ -112,7 +118,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         tvPrediction = findViewById(R.id.tvPrediction)
         tvTimer = findViewById(R.id.tvTimer)
 
-        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        sensorManager = applicationContext.getSystemService(Context.SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
         checkPermissions()
@@ -133,10 +139,17 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     }
 
     private fun checkPermissions() {
-        val permissions = arrayOf(
+        val permissions = mutableListOf(
             Manifest.permission.SEND_SMS,
             Manifest.permission.CALL_PHONE
         )
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            permissions.add(Manifest.permission.ACTIVITY_RECOGNITION)
+        }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        
         val missingPermissions = permissions.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
@@ -147,27 +160,40 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
     private fun startMonitoring() {
         accelerometer?.let {
-            // Adquirir WakeLock parcial para mantener la CPU activa con pantalla apagada
             val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
             wakeLock = powerManager.newWakeLock(
                 PowerManager.PARTIAL_WAKE_LOCK,
                 "EdgeImpulse17::MonitoringWakeLock"
             ).apply {
-                // Timeout de seguridad de 3 minutos (180s) por si algo falla
                 acquire(3 * 60 * 1000L)
             }
 
-            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
             isMonitoring = true
             isAlertActive = false
             inferenceInProgress.set(false)
             btnToggleMonitor.text = "Detener Monitoreo"
-            tvStatus.text = "Monitoreando..."
+            tvStatus.text = "Preparando en 5 segundos..."
             bufferIndex = 0
-            MonitoringLogManager.startSession(this, etPhone.text.toString().trim())
             etPhone.isEnabled = false
-            startSessionTimer()
-            logInfo("Monitoreo iniciado (WakeLock adquirido).")
+            tvTimer.visibility = TextView.VISIBLE
+
+            // Fase de preparación de 5 segundos
+            object : CountDownTimer(5000L, 1000L) {
+                override fun onTick(millisUntilFinished: Long) {
+                    val sec = (millisUntilFinished / 1000).toInt()
+                    tvTimer.text = "Iniciando en: $sec s"
+                }
+
+                override fun onFinish() {
+                    if (!isMonitoring) return // Cancelado durante la preparación
+                    tvStatus.text = "Monitoreando..."
+                    sensorManager.registerListener(this@MainActivity, it, SensorManager.SENSOR_DELAY_GAME)
+                    MonitoringLogManager.startSession(this@MainActivity, etPhone.text.toString().trim())
+                    startSessionTimer()
+                    logInfo("Monitoreo iniciado (WakeLock adquirido).")
+                }
+            }.start()
+
         } ?: logError("Acelerómetro no disponible.")
     }
 
@@ -221,7 +247,10 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     }
 
     override fun onSensorChanged(event: SensorEvent?) {
-        if (event == null || !isMonitoring || isAlertActive) return
+        // NOTA: isAlertActive ya NO bloquea la recoleccion de datos.
+        // El sensor captura siempre durante los 120s. La alerta solo impide
+        // lanzar una nueva AlertActivity mientras ya hay una activa.
+        if (event == null || !isMonitoring) return
 
         try {
             if (event.sensor.type == Sensor.TYPE_ACCELEROMETER) {
@@ -275,12 +304,28 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
      * dentro del bloque del executor para evitar bloquear el main thread.
      */
     private fun performInferenceAsync(features: FloatArray) {
+        // Watchdog: si la inferencia C++ se cuelga más de 2s, forzar liberación del flag
+        // para que el siguiente ciclo del sensor pueda intentar de nuevo.
+        val watchdog = android.os.Handler(android.os.Looper.getMainLooper())
+        val watchdogTask = Runnable {
+            if (inferenceInProgress.compareAndSet(true, false)) {
+                logError("Watchdog: inferencia C++ superó 2s, flag liberado forzadamente.")
+                MonitoringLogManager.recordDuplicatePrediction(this@MainActivity)
+            }
+        }
+        watchdog.postDelayed(watchdogTask, 2000L)
+
         inferenceExecutor.execute {
             try {
                 val resultString = runClassification(features)
 
+                // Cancelar watchdog si la inferencia terminó a tiempo
+                watchdog.removeCallbacks(watchdogTask)
+
                 if (resultString.startsWith("ERROR")) {
                     logError("Fallo en inferencia: $resultString")
+                    // Registrar duplicado para no perder el slot de 1 segundo en el JSON
+                    MonitoringLogManager.recordDuplicatePrediction(this@MainActivity)
                     return@execute
                 }
 
@@ -303,18 +348,27 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                     MonitoringLogManager.updatePrediction(this@MainActivity, predictionText, label)
                     MonitoringLogManager.recordWindow(this@MainActivity)
 
-                    // Detectar caída
-                    if (FALL_CLASSES.contains(label) && confidence >= FALL_THRESHOLD) {
+                    // Detectar caida: solo lanzar alerta si no hay una activa ya
+                    if (FALL_CLASSES.contains(label) && confidence >= FALL_THRESHOLD && !isAlertActive) {
                         MonitoringLogManager.recordFall(this@MainActivity)
                         logInfo("Posible caída detectada ($label). Lanzando AlertActivity.")
                         runOnUiThread {
                             startFallAlert(translatedLabel)
                         }
                     }
+                } else {
+                    // Formato inesperado → duplicar predicción para no perder slot
+                    MonitoringLogManager.recordDuplicatePrediction(this@MainActivity)
                 }
+            } catch (t: Throwable) {
+                // Capturar Throwable (no solo Exception) para atrapar errores JNI de bajo nivel
+                // como UnsatisfiedLinkError, NullPointerException nativa, etc.
+                logError("Error grave en inferencia C++: ${t.message}")
+                watchdog.removeCallbacks(watchdogTask)
+                MonitoringLogManager.recordDuplicatePrediction(this@MainActivity)
             } finally {
-                // SIEMPRE liberar el flag para permitir la siguiente inferencia,
-                // incluso si hubo un error o excepción.
+                // SIEMPRE liberar el flag para permitir la siguiente inferencia.
+                // Este bloque se ejecuta incluso si hay return@execute arriba.
                 inferenceInProgress.set(false)
             }
         }
@@ -323,6 +377,15 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private fun startFallAlert(fallType: String) {
         isAlertActive = true
         val phone = etPhone.text.toString().trim()
+
+        // Safeguard: si AlertActivity no responde en 30s (pantalla apagada),
+        // resetear el flag para no bloquear el resto de la sesion.
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            if (isAlertActive) {
+                isAlertActive = false
+                logError("Safeguard: AlertActivity no respondio en 30s, isAlertActive reseteado.")
+            }
+        }, 30_000L)
         
         val intent = Intent(this, AlertActivity::class.java).apply {
             putExtra(AlertActivity.EXTRA_PHONE, phone)
@@ -378,5 +441,35 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
     private fun logError(message: String) {
         Log.e(TAG, message)
+    }
+
+    private fun startUdpListener() {
+        thread(isDaemon = true) {
+            try {
+                val socket = DatagramSocket(null)
+                socket.reuseAddress = true
+                socket.bind(java.net.InetSocketAddress(50000))
+                socket.broadcast = true
+                val buffer = ByteArray(256)
+                while (true) {
+                    val packet = DatagramPacket(buffer, buffer.size)
+                    socket.receive(packet)
+                    val message = String(packet.data, 0, packet.length).trim()
+                    Log.d("UDP_LISTENER", "Recibido: $message")
+                    
+                    if (message == "START_MONITORING") {
+                        if (!isMonitoring) {
+                            runOnUiThread { startMonitoring() }
+                        }
+                    } else if (message == "STOP_MONITORING") {
+                        if (isMonitoring) {
+                            runOnUiThread { stopMonitoring() }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("UDP_LISTENER", "Error: ${e.message}")
+            }
+        }
     }
 }

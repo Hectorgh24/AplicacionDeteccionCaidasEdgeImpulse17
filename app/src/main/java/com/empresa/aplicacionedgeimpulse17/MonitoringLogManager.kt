@@ -21,6 +21,11 @@ data class PredictionEvent(
     val className: String
 )
 
+data class MemoryEvent(
+    val timeSeconds: Int,
+    val ramMB: Float
+)
+
 data class SensorEventData(
     val timeOffsetMillis: Long,
     val x: Float,
@@ -37,6 +42,7 @@ data class MonitoringSessionLog(
     val emergencyNumber: String = "",
     val currentPrediction: String = "Inactivo",
     val predictionHistory: CopyOnWriteArrayList<PredictionEvent> = CopyOnWriteArrayList(),
+    val memoryHistory: CopyOnWriteArrayList<MemoryEvent> = CopyOnWriteArrayList(),
     @Transient val sensorHistory: MutableList<SensorEventData> = mutableListOf()
 ) {
     val durationSeconds: Long
@@ -68,6 +74,15 @@ data class MonitoringSessionLog(
                 historyArray.put(eventObj)
             }
             put("predictionHistory", historyArray)
+
+            val memoryArray = JSONArray()
+            ArrayList(memoryHistory).forEach { event ->
+                val eventObj = JSONObject()
+                eventObj.put("timeSeconds", event.timeSeconds)
+                eventObj.put("ramMB", event.ramMB.toDouble())
+                memoryArray.put(eventObj)
+            }
+            put("memoryHistory", memoryArray)
 
             // Incluir datos completos del acelerómetro para reconstrucción de gráfico por Python
             val sensorArray = JSONArray()
@@ -127,6 +142,17 @@ data class MonitoringSessionLog(
                         }
                     }
                 },
+                memoryHistory = CopyOnWriteArrayList<MemoryEvent>().apply {
+                    val arr = json.optJSONArray("memoryHistory")
+                    if (arr != null) {
+                        for (i in 0 until arr.length()) {
+                            val obj = arr.optJSONObject(i)
+                            if (obj != null) {
+                                add(MemoryEvent(obj.optInt("timeSeconds"), obj.optDouble("ramMB", 0.0).toFloat()))
+                            }
+                        }
+                    }
+                },
                 sensorHistory = sensorList
             )
         }
@@ -135,7 +161,7 @@ data class MonitoringSessionLog(
 
 object MonitoringLogManager {
     private const val LOG_FILE_NAME = "monitoring_log.json"
-    private const val EXPORT_FILE_NAME = "datos-monitoreo-edgeimpulse17-clases.json"
+    private const val EXPORT_FILE_NAME_PREFIX = "datos-monitoreo-edgeimpulse17-clases"
 
     @Volatile
     private var currentSession: MonitoringSessionLog? = null
@@ -194,7 +220,7 @@ object MonitoringLogManager {
      * solo guardamos cada SAVE_INTERVAL_MS o en eventos críticos (start/stop/fall/alert).
      */
     private var lastSaveTimeMs = 0L
-    private const val SAVE_INTERVAL_MS = 15_000L // Guardar a disco cada 15 segundos máximo
+    private const val SAVE_INTERVAL_MS = 1_000L // Guardar a disco cada 1 segundo (precision de 1s requerida)
 
     /**
      * Executor dedicado para I/O de disco, separado del hilo de inferencia
@@ -216,7 +242,7 @@ object MonitoringLogManager {
      * A 50Hz con decimación 2, se guardan 25Hz (suficiente para reconstrucción).
      */
     private var fullHistoryDecimationCount = 0
-    private const val FULL_HISTORY_DECIMATION = 2
+    private const val FULL_HISTORY_DECIMATION = 1
 
     fun startSession(context: Context, emergencyNumber: String) {
         // Limpiar buffers de sesión anterior
@@ -278,11 +304,13 @@ object MonitoringLogManager {
         ringHead = (ringHead + 1) % RING_CAPACITY
         if (ringCount < RING_CAPACITY) ringCount++
 
-        // === Historial completo diezmado (para exportación JSON/Python) ===
+        // === Historial completo (para exportación JSON/Python) ===
         fullHistoryDecimationCount++
         if (fullHistoryDecimationCount >= FULL_HISTORY_DECIMATION) {
             fullHistoryDecimationCount = 0
-            fullSensorHistory.add(SensorEventData(offset, x, y, z))
+            synchronized(fullSensorHistory) {
+                fullSensorHistory.add(SensorEventData(offset, x, y, z))
+            }
         }
 
         // === Publicar snapshot solo cada N muestras para refresco suave ===
@@ -309,7 +337,9 @@ object MonitoringLogManager {
     fun updatePrediction(context: Context, prediction: String, className: String) {
         currentSession?.let {
             lastClassName = className
-            it.predictionHistory.add(PredictionEvent(it.durationSeconds.toInt(), className))
+            val timeSec = it.durationSeconds.toInt()
+            it.predictionHistory.add(PredictionEvent(timeSec, className))
+            it.memoryHistory.add(MemoryEvent(timeSec, android.os.Debug.getPss() / 1024f))
             currentSession = it.copy(currentPrediction = prediction)
             saveIfNeeded(context) // Guardado periódico
         }
@@ -323,7 +353,9 @@ object MonitoringLogManager {
     @Synchronized
     fun recordDuplicatePrediction(context: Context) {
         currentSession?.let {
-            it.predictionHistory.add(PredictionEvent(it.durationSeconds.toInt(), lastClassName))
+            val timeSec = it.durationSeconds.toInt()
+            it.predictionHistory.add(PredictionEvent(timeSec, lastClassName))
+            it.memoryHistory.add(MemoryEvent(timeSec, android.os.Debug.getPss() / 1024f))
             saveIfNeeded(context) // Guardado periódico
         }
     }
@@ -347,10 +379,13 @@ object MonitoringLogManager {
         currentSession?.let {
             // Copiar los datos completos del sensor al log de sesión antes de guardar
             it.sensorHistory.clear()
-            it.sensorHistory.addAll(fullSensorHistory)
+            synchronized(fullSensorHistory) {
+                it.sensorHistory.addAll(fullSensorHistory)
+            }
             currentSession = it.copy(sessionEndMillis = System.currentTimeMillis())
             // Guardar final de forma SÍNCRONA para asegurar que todos los datos se persistan
             saveCurrentSessionSync(context)
+            exportReportToDownloads(context) // EXPORTACION AUTOMATICA
         }
     }
 
@@ -371,16 +406,21 @@ object MonitoringLogManager {
         val session = currentSession ?: loadLastSession(context) ?: return null
 
         // Si la sesión activa no tiene datos de sensor copiados aún, inyectarlos
-        if (session.sensorHistory.isEmpty() && fullSensorHistory.isNotEmpty()) {
-            session.sensorHistory.addAll(fullSensorHistory)
+        synchronized(fullSensorHistory) {
+            if (session.sensorHistory.isEmpty() && fullSensorHistory.isNotEmpty()) {
+                session.sensorHistory.addAll(fullSensorHistory)
+            }
         }
 
-        val jsonData = session.toJson().toString(2).toByteArray()
+        val jsonContent = session.toJson().toString(2)
+        val jsonData = jsonContent.toByteArray()
+        val timestampString = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val exportFileName = "${EXPORT_FILE_NAME_PREFIX}_${timestampString}.json"
 
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val resolver = context.contentResolver
             val values = ContentValues().apply {
-                put(MediaStore.Downloads.DISPLAY_NAME, EXPORT_FILE_NAME)
+                put(MediaStore.Downloads.DISPLAY_NAME, exportFileName)
                 put(MediaStore.Downloads.MIME_TYPE, "application/json")
                 put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
                 put(MediaStore.Downloads.IS_PENDING, 1)
@@ -391,14 +431,14 @@ object MonitoringLogManager {
             values.clear()
             values.put(MediaStore.Downloads.IS_PENDING, 0)
             resolver.update(uri, values, null, null)
-            "Download/$EXPORT_FILE_NAME"
+            "Download/$exportFileName"
         } else {
             val downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
             if (!downloadDir.exists()) {
                 downloadDir.mkdirs()
             }
-            val file = File(downloadDir, EXPORT_FILE_NAME)
-            FileOutputStream(file).use { it.write(jsonData) }
+            val file = File(downloadDir, exportFileName)
+            file.writeText(jsonContent)
             file.absolutePath
         }
     }
@@ -420,8 +460,16 @@ object MonitoringLogManager {
     private fun saveCurrentSessionAsync(context: Context) {
         if (isSaving) return // Ya hay un guardado en progreso, no acumular
         val session = currentSession ?: return
-        // Tomar un snapshot de los datos antes de enviar al hilo de I/O
+        
+        // INYECTAR SNAPSHOT DEL SENSOR AQUÍ:
+        // Asegura que los autoguardados periódicos (cada 15s) siempre incluyan 
+        // todos los puntos del acelerómetro, evitando que se guarde vacío (0 puntos) 
+        // si la app se cierra antes de completar los 120 segundos.
+        val sensorSnapshot = synchronized(fullSensorHistory) { ArrayList(fullSensorHistory) }
+        
         val jsonString = try {
+            session.sensorHistory.clear()
+            session.sensorHistory.addAll(sensorSnapshot)
             session.toJson().toString(2)
         } catch (_: Exception) {
             return
